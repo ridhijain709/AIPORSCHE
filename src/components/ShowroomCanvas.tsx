@@ -1,5 +1,12 @@
 import React, { useEffect, useRef } from 'react';
 import * as THREE from 'three';
+import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js';
+import { RGBELoader } from 'three/examples/jsm/loaders/RGBELoader.js';
+import { EffectComposer } from 'three/examples/jsm/postprocessing/EffectComposer.js';
+import { RenderPass } from 'three/examples/jsm/postprocessing/RenderPass.js';
+import { UnrealBloomPass } from 'three/examples/jsm/postprocessing/UnrealBloomPass.js';
+import { OutputPass } from 'three/examples/jsm/postprocessing/OutputPass.js';
+import { RoomEnvironment } from 'three/examples/jsm/environments/RoomEnvironment.js';
 import { VehicleConfig, CameraPreset } from '../types';
 import { 
   createShowroomPavilion, 
@@ -87,13 +94,14 @@ export const ShowroomCanvas: React.FC<ShowroomCanvasProps> = ({
   // Dynamic references to 3D sub-assemblies for animation and updates
   const carGroupRef = useRef<THREE.Group | null>(null);
   const bodyMeshRef = useRef<THREE.Mesh | null>(null);
-  const bodyMaterialRef = useRef<THREE.MeshStandardMaterial | null>(null);
+  const bodyMaterialRef = useRef<THREE.MeshPhysicalMaterial | null>(null);
   const glassMaterialRef = useRef<THREE.MeshPhysicalMaterial | null>(null);
   const rimMaterialsRef = useRef<THREE.MeshStandardMaterial[]>([]);
   const caliperMaterialsRef = useRef<THREE.MeshStandardMaterial[]>([]);
   const interiorMaterialRef = useRef<THREE.MeshStandardMaterial | null>(null);
   const headlightMaterialsRef = useRef<THREE.MeshStandardMaterial[]>([]);
   const taillightMaterialRef = useRef<THREE.MeshStandardMaterial | null>(null);
+  const composerRef = useRef<EffectComposer | null>(null);
 
   // Showroom Fleet & Avatars Refs
   const avatarGroupRef = useRef<THREE.Group | null>(null);
@@ -154,8 +162,46 @@ export const ShowroomCanvas: React.FC<ShowroomCanvasProps> = ({
     renderer.shadowMap.type = THREE.PCFSoftShadowMap;
     renderer.toneMapping = THREE.ACESFilmicToneMapping;
     renderer.toneMappingExposure = 1.15;
+    renderer.outputColorSpace = THREE.SRGBColorSpace;
     container.appendChild(renderer.domElement);
     rendererRef.current = renderer;
+
+    // 3b. EffectComposer — RenderPass → UnrealBloom → OutputPass
+    const composer = new EffectComposer(renderer);
+    const renderPass = new RenderPass(scene, camera);
+    composer.addPass(renderPass);
+
+    const bloomPass = new UnrealBloomPass(
+      new THREE.Vector2(width, height),
+      0.45,   // strength — subtle luxury glow
+      0.55,   // radius — spread on headlights/LEDs
+      0.82    // threshold — only very bright emissives bloom
+    );
+    composer.addPass(bloomPass);
+
+    const outputPass = new OutputPass();
+    composer.addPass(outputPass);
+    composerRef.current = composer;
+
+    // 3c. HDRI Studio Environment Map (loaded async, fallbacks gracefully)
+    const rgbeLoader = new RGBELoader();
+    rgbeLoader.load(
+      '/textures/studio_hdr.hdr',
+      (hdriTexture) => {
+        hdriTexture.mapping = THREE.EquirectangularReflectionMapping;
+        scene.environment = hdriTexture;
+        // Keep scene background dark; environment only drives reflections
+      },
+      undefined,
+      () => {
+        // No HDRI file — use procedural PMREMGenerator environment
+        const pmrem = new THREE.PMREMGenerator(renderer);
+        pmrem.compileEquirectangularShader();
+        const envTexture = pmrem.fromScene(new RoomEnvironment()).texture;
+        scene.environment = envTexture;
+        pmrem.dispose();
+      }
+    );
 
     // 4. Studio Lighting Rig
     // Ambient light
@@ -192,6 +238,7 @@ export const ShowroomCanvas: React.FC<ShowroomCanvasProps> = ({
     const showroomPavilion = createShowroomPavilion();
     scene.add(showroomPavilion);
 
+
     // Central Configurable Turntable Stage
     const floorRadius = 4.8;
     const floorGeo = new THREE.CylinderGeometry(floorRadius, floorRadius, 0.15, 64);
@@ -218,15 +265,54 @@ export const ShowroomCanvas: React.FC<ShowroomCanvasProps> = ({
     ringMesh.position.y = 0.13;
     scene.add(ringMesh);
 
-    // 6. Showroom Bay A Vehicle: Porsche Taycan Turbo GT (EV Wing)
-    const taycan = createTaycanShowroomCar();
-    scene.add(taycan);
-    taycanCarRef.current = taycan;
+    // 6. Showroom Bay A: Try GLTF Taycan first, fallback to procedural
+    const gltfLoader = new GLTFLoader();
+    const taycanProc = createTaycanShowroomCar();
+    scene.add(taycanProc);
+    taycanCarRef.current = taycanProc;
+    gltfLoader.load(
+      '/models/porsche_taycan.glb',
+      (gltf) => {
+        const model = gltf.scene;
+        model.position.set(-7.2, 0.12, -2.5);
+        model.rotation.y = Math.PI / 5;
+        model.scale.setScalar(0.8);
+        model.traverse((child) => {
+          if ((child as THREE.Mesh).isMesh) {
+            child.castShadow = true;
+            child.receiveShadow = true;
+          }
+        });
+        scene.remove(taycanProc);
+        scene.add(model);
+        taycanCarRef.current = model;
+      },
+      undefined, () => { /* keep procedural */ }
+    );
 
-    // 7. Showroom Bay B Vehicle: Porsche 911 GT3 RS (Track Wing)
-    const gt3rs = createGT3RSShowroomCar();
-    scene.add(gt3rs);
-    gt3rsCarRef.current = gt3rs;
+    // 7. Showroom Bay B: Try GLTF GT3 RS first, fallback to procedural
+    const gt3rsProc = createGT3RSShowroomCar();
+    scene.add(gt3rsProc);
+    gt3rsCarRef.current = gt3rsProc;
+    gltfLoader.load(
+      '/models/porsche_gt3rs.glb',
+      (gltf) => {
+        const model = gltf.scene;
+        model.position.set(7.2, 0.12, -2.5);
+        model.rotation.y = -Math.PI / 5;
+        model.scale.setScalar(0.8);
+        model.traverse((child) => {
+          if ((child as THREE.Mesh).isMesh) {
+            child.castShadow = true;
+            child.receiveShadow = true;
+          }
+        });
+        scene.remove(gt3rsProc);
+        scene.add(model);
+        gt3rsCarRef.current = model;
+      },
+      undefined, () => { /* keep procedural */ }
+    );
 
     // 8. 3D Avatars: Store Owner AI Clone & VIP Client
     const avatarsContainer = new THREE.Group();
@@ -238,10 +324,89 @@ export const ShowroomCanvas: React.FC<ShowroomCanvasProps> = ({
     avatarGroupRef.current = avatarsContainer;
     ownerHeadRef.current = ownerHead;
 
-    // 9. Assemble the Detailed 3D Luxury Sports Car on Center Stage
-    const car = createCarModel();
-    scene.add(car);
-    carGroupRef.current = car;
+    // 9. Center Stage: Try GLTF Porsche first, fallback to procedural
+    const procCar = createCarModel();
+    scene.add(procCar);
+    carGroupRef.current = procCar;
+    gltfLoader.load(
+      '/models/porsche_carrera.glb',
+      (gltf) => {
+        const model = gltf.scene;
+        model.position.set(0, 0, 0);
+        model.scale.setScalar(0.9);
+        // Traverse and apply MeshPhysicalMaterial with clearcoat
+        model.traverse((child) => {
+          const mesh = child as THREE.Mesh;
+          if (!mesh.isMesh) return;
+          mesh.castShadow = true;
+          mesh.receiveShadow = true;
+          const mat = mesh.material as THREE.MeshStandardMaterial;
+          if (!mat) return;
+          const name = (mat.name || '').toLowerCase();
+          // Body paint surfaces — upgrade to dual-coat physical lacquer
+          if (name.includes('body') || name.includes('paint') || name.includes('exterior')) {
+            const physMat = new THREE.MeshPhysicalMaterial({
+              color: new THREE.Color(config.bodyColor),
+              roughness: config.finish === 'matte' ? 0.88 : (config.finish === 'metallic' ? 0.22 : 0.10),
+              metalness: config.finish === 'matte' ? 0.15 : (config.finish === 'metallic' ? 0.85 : 0.40),
+              clearcoat: config.finish === 'matte' ? 0.0 : 1.0,
+              clearcoatRoughness: 0.03,
+              ior: 1.52,
+              reflectivity: 0.9,
+              envMapIntensity: 1.4,
+            });
+            mesh.material = physMat;
+            bodyMaterialRef.current = physMat;
+          }
+          // Glass surfaces
+          if (name.includes('glass') || name.includes('window') || name.includes('windsh')) {
+            mesh.material = new THREE.MeshPhysicalMaterial({
+              color: '#0A0F1D',
+              transmission: 0.88,
+              roughness: 0.04,
+              thickness: 0.6,
+              transparent: true,
+              opacity: 0.9,
+            });
+          }
+          // Rim / wheel surfaces
+          if (name.includes('rim') || name.includes('wheel') || name.includes('spoke')) {
+            const rimMat = new THREE.MeshStandardMaterial({
+              color: new THREE.Color(config.rimColor),
+              metalness: 0.88,
+              roughness: 0.20,
+            });
+            rimMaterialsRef.current.push(rimMat);
+            mesh.material = rimMat;
+          }
+          // Caliper surfaces
+          if (name.includes('caliper') || name.includes('brake')) {
+            const calMat = new THREE.MeshStandardMaterial({
+              color: new THREE.Color(config.caliperColor),
+              metalness: 0.3,
+              roughness: 0.2,
+            });
+            caliperMaterialsRef.current.push(calMat);
+            mesh.material = calMat;
+          }
+          // Interior
+          if (name.includes('interior') || name.includes('seat') || name.includes('leather')) {
+            const intMat = new THREE.MeshStandardMaterial({
+              color: new THREE.Color(config.interiorColor),
+              roughness: 0.85,
+              metalness: 0.1,
+            });
+            interiorMaterialRef.current = intMat;
+            mesh.material = intMat;
+          }
+        });
+        scene.remove(procCar);
+        scene.add(model);
+        carGroupRef.current = model;
+      },
+      undefined, () => { /* keep procedural car */ }
+    );
+
 
     // 10. Mouse Orbit & Touch Controls
     const handleMouseDown = (e: MouseEvent) => {
@@ -333,6 +498,7 @@ export const ShowroomCanvas: React.FC<ShowroomCanvasProps> = ({
       cameraRef.current.aspect = w / h;
       cameraRef.current.updateProjectionMatrix();
       rendererRef.current.setSize(w, h);
+      composerRef.current?.setSize(w, h);
     });
     resizeObserver.observe(container);
 
@@ -408,7 +574,10 @@ export const ShowroomCanvas: React.FC<ShowroomCanvasProps> = ({
         ownerHeadRef.current.rotation.y = Math.sin(time * 0.9) * 0.07;
       }
 
-      if (rendererRef.current && sceneRef.current && cameraRef.current) {
+      // Use composer for bloom post-processing pipeline
+      if (composerRef.current && sceneRef.current && cameraRef.current) {
+        composerRef.current.render();
+      } else if (rendererRef.current && sceneRef.current && cameraRef.current) {
         rendererRef.current.render(sceneRef.current, cameraRef.current);
       }
     };
@@ -448,19 +617,24 @@ export const ShowroomCanvas: React.FC<ShowroomCanvasProps> = ({
 
   // Update Materials & Car Colors dynamically when config updates
   useEffect(() => {
-    // 1. Body Paint material update
+    // 1. Body Paint material update (MeshPhysicalMaterial with clearcoat)
     if (bodyMaterialRef.current) {
       bodyMaterialRef.current.color.set(config.bodyColor);
       if (config.finish === 'matte') {
         bodyMaterialRef.current.roughness = 0.88;
         bodyMaterialRef.current.metalness = 0.15;
+        bodyMaterialRef.current.clearcoat = 0.0;
       } else if (config.finish === 'metallic') {
         bodyMaterialRef.current.roughness = 0.22;
         bodyMaterialRef.current.metalness = 0.85;
+        bodyMaterialRef.current.clearcoat = 1.0;
+        bodyMaterialRef.current.clearcoatRoughness = 0.04;
       } else {
-        // Glossy
-        bodyMaterialRef.current.roughness = 0.12;
-        bodyMaterialRef.current.metalness = 0.45;
+        // Glossy — maximum lacquer shine
+        bodyMaterialRef.current.roughness = 0.10;
+        bodyMaterialRef.current.metalness = 0.40;
+        bodyMaterialRef.current.clearcoat = 1.0;
+        bodyMaterialRef.current.clearcoatRoughness = 0.03;
       }
       bodyMaterialRef.current.needsUpdate = true;
     }
@@ -512,11 +686,16 @@ export const ShowroomCanvas: React.FC<ShowroomCanvasProps> = ({
   const createCarModel = (): THREE.Group => {
     const car = new THREE.Group();
 
-    // Body Paint Material
-    const bodyMat = new THREE.MeshStandardMaterial({
+    // Body Paint Material — Dual-Coat Physical Automotive Lacquer
+    const bodyMat = new THREE.MeshPhysicalMaterial({
       color: new THREE.Color(config.bodyColor),
-      roughness: config.finish === 'matte' ? 0.88 : (config.finish === 'metallic' ? 0.22 : 0.12),
-      metalness: config.finish === 'matte' ? 0.15 : (config.finish === 'metallic' ? 0.85 : 0.45),
+      roughness: config.finish === 'matte' ? 0.88 : (config.finish === 'metallic' ? 0.22 : 0.10),
+      metalness: config.finish === 'matte' ? 0.15 : (config.finish === 'metallic' ? 0.85 : 0.40),
+      clearcoat: config.finish === 'matte' ? 0.0 : 1.0,         // Glossy & metallic get full lacquer coat
+      clearcoatRoughness: 0.03,                                   // Near-mirror clearcoat
+      ior: 1.52,                                                  // Real automotive lacquer IOR
+      reflectivity: 0.9,
+      envMapIntensity: 1.4,
     });
     bodyMaterialRef.current = bodyMat;
 
