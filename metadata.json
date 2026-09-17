@@ -1,0 +1,11 @@
+{
+  "name": "AI 3D Showroom Configurator",
+  "description": "Real-time 3D luxury vehicle showroom pavilion featuring multi-car fleet inventory, 3D store owner AI clone & VIP avatars, voice agent consultation, and automated dealership intelligence suite.",
+  "requestFramePermissions": [
+    "microphone"
+  ],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}
+
