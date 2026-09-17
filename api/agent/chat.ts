@@ -1,17 +1,5 @@
-import express from "express";
-import path from "path";
-import dotenv from "dotenv";
-import { createServer as createViteServer } from "vite";
 import { GoogleGenAI, Type, FunctionDeclaration } from "@google/genai";
 
-dotenv.config();
-
-const app = express();
-const PORT = 3000;
-
-app.use(express.json());
-
-// Initialize Gemini Client safely
 let aiClient: GoogleGenAI | null = null;
 function getGeminiClient(): GoogleGenAI | null {
   if (!aiClient && process.env.GEMINI_API_KEY) {
@@ -27,7 +15,6 @@ function getGeminiClient(): GoogleGenAI | null {
   return aiClient;
 }
 
-// Tool definitions for Gemini
 const configureVehicleTool: FunctionDeclaration = {
   name: "configure_vehicle",
   description: "Updates the visual configuration of the vehicle in the 3D showroom canvas in real-time. Call this whenever the customer mentions colors, paint finishes, rims, calipers, interior leather, or packages.",
@@ -156,17 +143,19 @@ Core Directives:
 4. If the client asks for pricing or quotes, give accurate luxury figures and note the options applied.
 `;
 
-// API Routes
-app.post("/api/agent/chat", async (req, res) => {
+export default async function handler(req: any, res: any) {
+  if (req.method !== 'POST') {
+    return res.status(405).json({ error: "Method not allowed. Use POST." });
+  }
+
   try {
-    const { message, currentConfig, history } = req.body;
+    const { message, currentConfig, history } = req.body || {};
     if (!message) {
       return res.status(400).json({ error: "Message is required" });
     }
 
     const ai = getGeminiClient();
 
-    // Contextual system prompt with current state
     const contextualSystemInstruction = `${SYSTEM_INSTRUCTION}
 
 Current Vehicle State in Showroom:
@@ -183,8 +172,7 @@ Current Vehicle State in Showroom:
 `;
 
     if (!ai) {
-      // Graceful fallback if GEMINI_API_KEY is not configured yet
-      // Deterministic NLP pattern matching for common requests
+      // Deterministic NLP fallback
       const lower = message.toLowerCase();
       const toolCalls: any[] = [];
       let replyText = "Welcome to the studio. I am Alex, your showroom specialist. How would you like to configure your Porsche today?";
@@ -273,17 +261,15 @@ Current Vehicle State in Showroom:
           : "Doors secured shut.";
       }
 
-      return res.json({
+      return res.status(200).json({
         replyText,
         toolCalls,
         audioText: replyText,
       });
     }
 
-    // Call Gemini 3.8 Flash with function calling
+    // Call Gemini 2.5 Flash
     const formattedContents: any[] = [];
-
-    // Include recent history if provided
     if (Array.isArray(history)) {
       for (const h of history.slice(-4)) {
         formattedContents.push({
@@ -345,40 +331,17 @@ Current Vehicle State in Showroom:
       };
     });
 
-    return res.json({
+    return res.status(200).json({
       replyText,
       toolCalls: executedTools,
       audioText: replyText,
     });
   } catch (error: any) {
-    console.error("Error in /api/agent/chat:", error);
-    res.status(500).json({ 
+    console.error("Error in Vercel /api/agent/chat:", error);
+    return res.status(500).json({ 
       error: error.message || "Failed to process showroom assistant request",
       replyText: "My apologies, the showroom telemetry encountered a momentary delay. Let me know what finish or angle you'd like to adjust.",
       toolCalls: []
     });
   }
-});
-
-// Start the Express and Vite server
-async function startServer() {
-  if (process.env.NODE_ENV !== "production") {
-    const vite = await createViteServer({
-      server: { middlewareMode: true },
-      appType: "spa",
-    });
-    app.use(vite.middlewares);
-  } else {
-    const distPath = path.join(process.cwd(), "dist");
-    app.use(express.static(distPath));
-    app.get("*", (req, res) => {
-      res.sendFile(path.join(distPath, "index.html"));
-    });
-  }
-
-  app.listen(PORT, "0.0.0.0", () => {
-    console.log(`Porsche 3D AI Showroom Server listening on port ${PORT}`);
-  });
 }
-
-startServer();
